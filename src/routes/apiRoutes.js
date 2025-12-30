@@ -1,0 +1,15 @@
+const express = require('express');
+const router = express.Router();
+const categoryController = require('../controllers/categoryController');
+const componentController = require('../controllers/componentController');
+const masterController = require('../controllers/masterController');
+router.post('/categories', categoryController.createCategory);
+router.get('/categories', categoryController.getCategories);
+router.get('/master-data', masterController.getInitData);
+
+router.get('/components', componentController.getComponents);
+router.get('/components/:id', componentController.getComponentById);
+router.post('/components', componentController.createComponent);
+router.patch('/components/:id', componentController.updateComponent);
+
+module.exports = router;

@@ -1,0 +1,96 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Category {
+  id          String      @id @default(uuid())
+  name        String      @unique
+  slug        String      @unique
+  specDefs    Json
+  compatKeys  String[]
+  components  Component[]
+}
+
+model CompatibilityRule {
+  id        String   @id @default(uuid())
+  name      String
+  severity  String
+  applies   String
+  expr      Json
+  message   String
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now())
+}
+
+model Component {
+  id             String   @id @default(uuid())
+  categoryId     String
+  category       Category @relation(fields: [categoryId], references: [id])
+  brand          String
+  model          String
+  variant        String?  @default("")
+  ean            String?
+  active_status  String   @default("active")
+  release_date   String?
+  warranty_years Int      @default(0)
+  images         String[]
+  product_page   String?
+  datasheet_url  String?
+  specs          Json     @default("{}")
+  compatibility  Json     @default("{}")
+  completeness   Int      @default(0)
+  needs_review   Boolean  @default(true)
+  review_status  String   @default("unreviewed")
+  offers         Offer[]
+  externalIds    ExternalId[]
+  auditLogs      AuditLog[]
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([brand, model, variant])
+}
+
+model Offer {
+  id              String    @id @default(uuid())
+  componentId     String
+  component       Component @relation(fields: [componentId], references: [id], onDelete: Cascade)
+  vendorId        String
+  sourceId        String
+  price           Int
+  shipping        Int       @default(0)
+  effective_price Int
+  in_stock        Boolean   @default(false)
+  quantity        Int       @default(0)
+  vendor_url      String
+  last_updated    DateTime  @default(now())
+
+  @@index([componentId])
+}
+
+model ExternalId {
+  id          String    @id @default(uuid())
+  componentId String
+  component   Component @relation(fields: [componentId], references: [id], onDelete: Cascade)
+  sourceId    String
+  externalId  String
+  externalUrl String?
+  matchMethod String?
+  confidence  Float     @default(1.0)
+}
+
+model AuditLog {
+  id          String    @id @default(uuid())
+  componentId String
+  component   Component @relation(fields: [componentId], references: [id], onDelete: Cascade)
+  actor       String
+  action      String
+  field       String
+  before      String?
+  after       String?
+  timestamp   DateTime  @default(now())
+}
