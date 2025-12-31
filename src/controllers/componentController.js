@@ -1,6 +1,6 @@
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
-
+const { processSingleLink } = require('../jobs/priceTracker'); 
 // --- GET ALL COMPONENTS ---
 exports.getComponents = async (req, res) => {
   try {
@@ -279,4 +279,48 @@ exports.updateComponent = async (req, res) => {
     console.error("Update Error:", error);
     res.status(500).json({ error: error.message });
   }
+};
+
+exports.addTrackedLink = async (req, res) => {
+    try {
+        const { componentId, url } = req.body;
+
+        if (!componentId || !url) {
+            return res.status(400).json({ error: "Component ID and URL are required" });
+        }
+
+        let sourceId = "unknown";
+        if (url.includes("mdcomputers")) sourceId = "mdcomputers";
+        else if (url.includes("vedant")) sourceId = "vedant";
+
+        // 1. Link DB mein Save karo
+        const newLink = await prisma.externalId.create({
+            data: {
+                componentId,
+                externalUrl: url,
+                sourceId: sourceId,
+                externalId: "manual-link",
+                matchMethod: "manual",
+                confidence: 1.0,
+                isActive: true
+            }
+        });
+
+        // 2. INSTANT SCRAPE TRIGGER
+        // Hum await nahi laga rahe taaki UI turant success dikha de,
+        // par background mein scraping chalu ho jayegi.
+        console.log("⚡ Triggering instant scrape for new link...");
+        processSingleLink(newLink).then(result => {
+            if(result) console.log("⚡ Instant Update Complete!");
+        });
+
+        res.json({ 
+            message: "Link added! Price is updating in background...", 
+            data: newLink 
+        });
+
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: error.message });
+    }
 };

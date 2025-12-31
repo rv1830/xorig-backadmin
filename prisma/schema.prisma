@@ -8,12 +8,12 @@ datasource db {
 }
 
 model Category {
-  id          String      @id @default(uuid())
-  name        String      @unique
-  slug        String      @unique
-  specDefs    Json
-  compatKeys  String[]
-  components  Component[]
+  id         String      @id @default(uuid())
+  name       String      @unique
+  slug       String      @unique
+  specDefs   Json
+  compatKeys String[]
+  components Component[]
 }
 
 model CompatibilityRule {
@@ -28,29 +28,29 @@ model CompatibilityRule {
 }
 
 model Component {
-  id             String   @id @default(uuid())
-  categoryId     String
-  category       Category @relation(fields: [categoryId], references: [id])
-  brand          String
-  model          String
-  variant        String?  @default("")
-  ean            String?
-  active_status  String   @default("active")
-  release_date   String?
-  warranty_years Int      @default(0)
-  images         String[]
-  product_page   String?
-  datasheet_url  String?
-  specs          Json     @default("{}")
-  compatibility  Json     @default("{}")
-  completeness   Int      @default(0)
-  needs_review   Boolean  @default(true)
-  review_status  String   @default("unreviewed")
-  offers         Offer[]
-  externalIds    ExternalId[]
-  auditLogs      AuditLog[]
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  id            String       @id @default(uuid())
+  categoryId    String
+  category      Category     @relation(fields: [categoryId], references: [id])
+  brand         String
+  model         String
+  variant       String?      @default("")
+  ean           String?
+  active_status String       @default("active")
+  release_date  String?
+  warranty_years Int         @default(0)
+  images        String[]
+  product_page  String?
+  datasheet_url String?
+  specs         Json         @default("{}")
+  compatibility Json         @default("{}")
+  completeness  Int          @default(0)
+  needs_review  Boolean      @default(true)
+  review_status String       @default("unreviewed")
+  offers        Offer[]
+  externalIds   ExternalId[]
+  auditLogs     AuditLog[]
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
 
   @@unique([brand, model, variant])
 }
@@ -73,14 +73,17 @@ model Offer {
 }
 
 model ExternalId {
-  id          String    @id @default(uuid())
-  componentId String
-  component   Component @relation(fields: [componentId], references: [id], onDelete: Cascade)
-  sourceId    String
-  externalId  String
-  externalUrl String?
-  matchMethod String?
-  confidence  Float     @default(1.0)
+  id            String    @id @default(uuid())
+  componentId   String
+  component     Component @relation(fields: [componentId], references: [id], onDelete: Cascade)
+  sourceId      String
+  externalId    String
+  externalUrl   String?
+  matchMethod   String?
+  confidence    Float     @default(1.0)
+  isActive      Boolean   @default(true)
+  lastCheckedAt DateTime?
+  failCount     Int       @default(0)
 }
 
 model AuditLog {

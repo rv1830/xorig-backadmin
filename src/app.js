@@ -1,5 +1,7 @@
 const express = require('express');
 const cors = require('cors');
+const cron = require('node-cron');
+const { runPriceTracker } = require('./jobs/priceTracker');
 const apiRoutes = require('./routes/apiRoutes'); // Adjust path as needed
 
 const app = express();
@@ -12,6 +14,11 @@ app.use(express.urlencoded({ extended: true }));
 
 // --- ROUTES ---
 app.use('/api', apiRoutes);
+
+cron.schedule('* * * * *', () => {
+    console.log("⏰ 1-Minute Scheduler Triggered");
+    runPriceTracker();
+});
 
 app.get('/', (req, res) => {
   res.send('XO Rig Backend is running');

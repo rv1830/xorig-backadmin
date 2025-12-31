@@ -6,10 +6,9 @@ const masterController = require('../controllers/masterController');
 router.post('/categories', categoryController.createCategory);
 router.get('/categories', categoryController.getCategories);
 router.get('/master-data', masterController.getInitData);
-
 router.get('/components', componentController.getComponents);
 router.get('/components/:id', componentController.getComponentById);
 router.post('/components', componentController.createComponent);
 router.patch('/components/:id', componentController.updateComponent);
-
+router.post('/components/track-link', componentController.addTrackedLink);
 module.exports = router;
