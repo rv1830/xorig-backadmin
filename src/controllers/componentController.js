@@ -1,20 +1,21 @@
-const prisma = require('../config/db');
+const { PrismaClient } = require('@prisma/client');
+const prisma = new PrismaClient();
 
+// --- GET ALL COMPONENTS ---
 exports.getComponents = async (req, res) => {
   try {
     const { category, search } = req.query;
     const where = {};
-    
+
     if (category && category !== 'All') {
       where.category = { name: category };
     }
-    
+
     if (search) {
       where.OR = [
         { brand: { contains: search, mode: 'insensitive' } },
         { model: { contains: search, mode: 'insensitive' } },
         { variant: { contains: search, mode: 'insensitive' } },
-        { id: { contains: search, mode: 'insensitive' } }
       ];
     }
 
@@ -27,32 +28,28 @@ exports.getComponents = async (req, res) => {
       orderBy: { updatedAt: 'desc' }
     });
 
+    // Format data to match Frontend UI expectations
     const formatted = components.map(c => {
+      // Logic to find best offer
       const bestOffer = c.offers
         .filter(o => o.in_stock)
         .sort((a, b) => a.effective_price - b.effective_price)[0];
 
       return {
+        ...c,
         component_id: c.id,
-        category: c.category.name,
-        brand: c.brand,
-        model: c.model,
-        variant_name: c.variant,
-        active_status: c.active_status,
-        ean: c.ean,
-        release_date: c.release_date,
-        warranty_years: c.warranty_years,
-        images: c.images,
-        product_page_url: c.product_page,
-        datasheet_url: c.datasheet_url,
+        category: c.category?.name,
+        variant_name: c.variant, // Map DB 'variant' -> UI 'variant_name'
+        product_page_url: c.product_page, // Map DB 'product_page' -> UI 'product_page_url'
+        
+        // Reconstruct Quality Object from flat DB fields
         quality: { 
           completeness: c.completeness, 
           needs_review: c.needs_review,
           review_status: c.review_status 
         },
-        specs: c.specs,
-        compatibility: c.compatibility,
-        offers: c.offers,
+        
+        // Flattened Offer Data for Grid
         _best_price: bestOffer ? bestOffer.effective_price : null,
         _in_stock: bestOffer ? true : false,
         _updated_at: bestOffer ? bestOffer.last_updated : null,
@@ -61,10 +58,12 @@ exports.getComponents = async (req, res) => {
 
     res.json(formatted);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error("Get Error:", error);
+    res.status(500).json({ error: "Failed to fetch components" });
   }
 };
 
+// --- GET SINGLE COMPONENT ---
 exports.getComponentById = async (req, res) => {
   try {
     const component = await prisma.component.findUnique({
@@ -73,23 +72,26 @@ exports.getComponentById = async (req, res) => {
         category: true,
         offers: true,
         externalIds: true,
-        auditLogs: { orderBy: { timestamp: 'desc' } }
+        auditLogs: { orderBy: { timestamp: 'desc' } } // Schema uses auditLogs
       }
     });
     
     if(!component) return res.status(404).json({error: "Not found"});
 
+    // Map DB structure to Frontend structure
     const result = {
         ...component,
         component_id: component.id,
         category: component.category.name,
-        product_page_url: component.product_page,
         variant_name: component.variant,
+        product_page_url: component.product_page,
+        
         quality: {
             completeness: component.completeness,
             needs_review: component.needs_review,
             review_status: component.review_status
         },
+        
         external_ids: component.externalIds.map(x => ({
             source_id: x.sourceId,
             external_id: x.externalId,
@@ -97,6 +99,7 @@ exports.getComponentById = async (req, res) => {
             match_method: x.matchMethod,
             match_confidence: x.confidence
         })),
+        
         audit: component.auditLogs.map(l => ({
             at: l.timestamp,
             actor: l.actor,
@@ -113,27 +116,64 @@ exports.getComponentById = async (req, res) => {
   }
 };
 
+// --- CREATE COMPONENT ---
 exports.createComponent = async (req, res) => {
   try {
+    console.log("Create Payload:", req.body); // Debugging
+
+    // 1. Destructure based on Frontend Payload
     const { 
-        categoryName, brand, model, variant, 
-        specs, compatibility, active_status,
-        ean, warranty_years, release_date
+        category, // Frontend sends "category" string (e.g., "CPU")
+        brand, 
+        model, 
+        variant_name, 
+        active_status,
+        ean, 
+        warranty_years, 
+        release_date,
+        specs, 
+        compatibility,
+        product_page_url,
+        datasheet_url,
+        images,
+        quality // Object { completeness, needs_review, ... }
     } = req.body;
 
-    const category = await prisma.category.findUnique({ where: { name: categoryName } });
-    if (!category) return res.status(400).json({ error: "Invalid Category" });
+    // 2. Validate Category
+    if (!category) return res.status(400).json({ error: "Category is required" });
 
+    // 3. Find Category ID
+    const categoryRecord = await prisma.category.findUnique({ 
+        where: { name: category } 
+    });
+    
+    if (!categoryRecord) {
+        return res.status(400).json({ error: `Category '${category}' not found.` });
+    }
+
+    // 4. Create in DB (Mapping UI fields to DB Schema)
     const newComp = await prisma.component.create({
       data: {
-        categoryId: category.id,
-        brand, model, variant,
+        categoryId: categoryRecord.id,
+        brand, 
+        model, 
+        variant: variant_name || "", // Map 'variant_name' -> 'variant'
         active_status: active_status || "active",
         ean, 
         warranty_years: Number(warranty_years) || 0,
         release_date,
         specs: specs || {},
         compatibility: compatibility || {},
+        product_page: product_page_url,
+        datasheet_url,
+        images: images || [],
+
+        // Flatten Quality Object -> Schema Columns
+        completeness: Number(quality?.completeness || 0),
+        needs_review: quality?.needs_review ?? true,
+        review_status: quality?.review_status || "unreviewed",
+
+        // Add Audit Log
         auditLogs: {
             create: {
                 actor: "admin@xor",
@@ -142,24 +182,43 @@ exports.createComponent = async (req, res) => {
                 after: "created"
             }
         }
+      },
+      include: {
+          category: true // Return category info for UI
       }
     });
+
     res.json(newComp);
   } catch (error) {
+    console.error("Create Error:", error);
+    if (error.code === 'P2002') {
+        return res.status(409).json({ error: "Component with this Brand/Model/Variant already exists." });
+    }
     res.status(500).json({ error: error.message });
   }
 };
 
+// --- UPDATE COMPONENT ---
 exports.updateComponent = async (req, res) => {
   try {
     const { id } = req.params;
+    // Assuming patch payload might be partial object OR specific field update
+    // For specific field update pattern used in grid:
     const { field, value, oldValue, actor } = req.body;
 
+    // If it's a direct object update (from Drawer Save), logic might differ, 
+    // but assuming Grid/Patch logic here:
+
     const updateData = {};
-    
-    if(field.startsWith("specs.") || field.startsWith("compatibility.") || field.startsWith("quality.")) {
+    let auditField = field || "update";
+    let auditBefore = oldValue ? String(oldValue) : "—";
+    let auditAfter = value ? String(value) : "—";
+
+    // Handle Nested JSON updates (specs/compatibility)
+    if(field && (field.startsWith("specs.") || field.startsWith("compatibility."))) {
         const [root, key] = field.split('.');
         
+        // Fetch current JSON
         const current = await prisma.component.findUnique({
             where: {id}, 
             select: {[root]: true}
@@ -167,6 +226,7 @@ exports.updateComponent = async (req, res) => {
         
         const jsonObj = current[root] || {};
         
+        // Update key
         if(root === 'specs') {
             jsonObj[key] = { 
                 v: value, 
@@ -178,21 +238,36 @@ exports.updateComponent = async (req, res) => {
             jsonObj[key] = value;
         }
         updateData[root] = jsonObj;
-    } else {
+    } 
+    // Handle specific column mappings
+    else if (field === 'variant_name') {
+        updateData.variant = value;
+    } 
+    else if (field === 'product_page_url') {
+        updateData.product_page = value;
+    }
+    // Default fallback
+    else if (field) {
         updateData[field] = value;
+    } 
+    // Fallback: if req.body contains full object (Drawer Save)
+    else {
+        // ... (Logic for full object update if needed, usually passed differently)
+        // For now, let's assume Grid pattern based on your previous code
     }
 
     const updated = await prisma.component.update({
       where: { id },
       data: {
         ...updateData,
+        updatedAt: new Date(),
         auditLogs: {
           create: {
             actor: actor || "admin@xor",
             action: "update",
-            field: field,
-            before: String(oldValue),
-            after: String(value)
+            field: auditField,
+            before: auditBefore,
+            after: auditAfter
           }
         }
       },
@@ -201,6 +276,7 @@ exports.updateComponent = async (req, res) => {
 
     res.json(updated);
   } catch (error) {
+    console.error("Update Error:", error);
     res.status(500).json({ error: error.message });
   }
 };
