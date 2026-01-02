@@ -1,15 +1,26 @@
-const prisma = require('../config/db');
-const { processSingleLink } = require('../jobs/priceTracker');
+const { PrismaClient } = require('@prisma/client');
+const prisma = new PrismaClient();
 const { scrapeSpecs } = require('../utils/scraper');
 
-// --- GET ALL COMPONENTS ---
+// --- Helper to prevent NaN Crashes ---
+const parseNum = (val) => {
+    const n = Number(val);
+    return isNaN(n) ? 0 : n;
+};
+
+// --- Helper to parse Float ---
+const parseFloatNum = (val) => {
+    const n = parseFloat(val);
+    return isNaN(n) ? 0.0 : n;
+};
+
 exports.getComponents = async (req, res) => {
   try {
-    const { category, search } = req.query;
+    const { type, search } = req.query;
     const where = {};
 
-    if (category && category !== 'All') {
-      where.category = { name: category };
+    if (type && type !== 'All') {
+      where.type = type;
     }
 
     if (search) {
@@ -22,280 +33,307 @@ exports.getComponents = async (req, res) => {
 
     const components = await prisma.component.findMany({
       where,
-      include: {
-        category: { select: { name: true } },
-        offers: true
+      select: {
+        id: true,
+        type: true,
+        brand: true,
+        model: true,
+        variant: true,
+        image_url: true,
+        price_current: true,
+        updatedAt: true,
+        product_page: true,
+        specs: true, // ✅ Return dynamic specs
+        offers: {
+          where: { in_stock: true },
+          orderBy: { price: 'asc' },
+          take: 1,
+          select: { price: true, vendor: true, url: true }
+        }
       },
       orderBy: { updatedAt: 'desc' }
     });
 
-    const formatted = components.map(c => {
-      // Logic to find best offer (Only In Stock)
-      const bestOffer = c.offers
-        .filter(o => o.in_stock)
-        .sort((a, b) => a.effective_price - b.effective_price)[0];
-
-      return {
-        ...c,
-        component_id: c.id,
-        category: c.category?.name,
-        variant_name: c.variant,
-        product_page_url: c.product_page,
-        
-        quality: { 
-          completeness: c.completeness, 
-          needs_review: c.needs_review,
-          review_status: c.review_status 
-        },
-        
-        // Flattened Offer Data for Grid
-        _best_price: bestOffer ? bestOffer.effective_price : null,
-        _in_stock: bestOffer ? true : false,
-        _updated_at: bestOffer ? bestOffer.last_updated : null,
-      };
-    });
+    const formatted = components.map(c => ({
+      id: c.id,
+      type: c.type,
+      name: `${c.brand} ${c.model} ${c.variant || ''}`.trim(),
+      brand: c.brand,
+      model: c.model,
+      variant: c.variant,
+      image: c.image_url,
+      best_price: c.offers[0] ? c.offers[0].price : c.price_current,
+      vendor: c.offers[0] ? c.offers[0].vendor : 'N/A',
+      url: c.offers[0] ? c.offers[0].url : c.product_page,
+      updatedAt: c.updatedAt,
+      // Pass raw data for editing
+      specs: c.specs, 
+    }));
 
     res.json(formatted);
   } catch (error) {
-    console.error("Get Error:", error);
     res.status(500).json({ error: "Failed to fetch components" });
   }
 };
 
-// --- GET SINGLE COMPONENT (FIXED MAPPING HERE) ---
 exports.getComponentById = async (req, res) => {
   try {
-    const component = await prisma.component.findUnique({
-      where: { id: req.params.id },
-      include: {
-        category: true,
-        offers: true,
-        externalIds: true,
-        auditLogs: { orderBy: { timestamp: 'desc' } }
-      }
+    const { id } = req.params;
+
+    const base = await prisma.component.findUnique({
+        where: { id },
+        include: { offers: true, externalIds: true }
     });
-    
-    if(!component) return res.status(404).json({error: "Not found"});
 
-    const result = {
-        ...component,
-        component_id: component.id,
-        category: component.category.name,
-        variant_name: component.variant,
-        product_page_url: component.product_page,
-        
-        quality: {
-            completeness: component.completeness,
-            needs_review: component.needs_review,
-            review_status: component.review_status
-        },
-        
-        // --- FIX: Using camelCase to match Frontend Expectations ---
-        external_ids: component.externalIds.map(x => ({
-            id: x.id,
-            sourceId: x.sourceId,        // Frontend uses 'sourceId'
-            externalId: x.externalId,
-            externalUrl: x.externalUrl,  // Frontend uses 'externalUrl'
-            matchMethod: x.matchMethod,
-            confidence: x.confidence
-        })),
-        
-        audit: component.auditLogs.map(l => ({
-            at: l.timestamp,
-            actor: l.actor,
-            action: l.action,
-            field: l.field,
-            before: l.before,
-            after: l.after
-        }))
-    };
+    if (!base) return res.status(404).json({ error: "Not found" });
 
-    res.json(result);
+    // Fetch strict compatibility data
+    let strictData = null;
+    switch (base.type) {
+        case 'CPU': strictData = await prisma.cpu.findUnique({ where: { componentId: id } }); break;
+        case 'GPU': strictData = await prisma.gpu.findUnique({ where: { componentId: id } }); break;
+        case 'MOTHERBOARD': strictData = await prisma.motherboard.findUnique({ where: { componentId: id } }); break;
+        case 'RAM': strictData = await prisma.ram.findUnique({ where: { componentId: id } }); break;
+        case 'STORAGE': strictData = await prisma.storage.findUnique({ where: { componentId: id } }); break;
+        case 'PSU': strictData = await prisma.psu.findUnique({ where: { componentId: id } }); break;
+        case 'CABINET': strictData = await prisma.cabinet.findUnique({ where: { componentId: id } }); break;
+        case 'COOLER': strictData = await prisma.cooler.findUnique({ where: { componentId: id } }); break;
+    }
+
+    // Return combined data:
+    // 1. Base info (brand, model)
+    // 2. specs: Dynamic JSON (Admin defined)
+    // 3. cpu/gpu/...: Strict data (for compatibility)
+    res.json({ 
+        ...base, 
+        [base.type.toLowerCase()]: strictData // e.g. "cpu": { cores: 6 }
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 };
 
-// --- CREATE COMPONENT ---
 exports.createComponent = async (req, res) => {
   try {
     const { 
-        category, brand, model, variant_name, active_status,
-        ean, warranty_years, release_date, specs, compatibility,
-        product_page_url, datasheet_url, images, quality 
+        type, brand, model, variant, 
+        price, image_url, product_page, 
+        
+        // Two types of data from Frontend:
+        specs,        // 1. Dynamic JSON (Custom fields)
+        compat_specs  // 2. Strict Fields (Socket, Cores etc.)
     } = req.body;
 
-    if (!category) return res.status(400).json({ error: "Category is required" });
-
-    const categoryRecord = await prisma.category.findUnique({ 
-        where: { name: category } 
-    });
-    
-    if (!categoryRecord) {
-        return res.status(400).json({ error: `Category '${category}' not found.` });
+    if (!type || !brand || !model) {
+        return res.status(400).json({ error: "Type, Brand and Model are required" });
     }
 
-    const newComp = await prisma.component.create({
-      data: {
-        categoryId: categoryRecord.id,
-        brand, model, 
-        variant: variant_name || "",
-        active_status: active_status || "active",
-        ean, warranty_years: Number(warranty_years) || 0,
-        release_date, specs: specs || {}, compatibility: compatibility || {},
-        product_page: product_page_url, datasheet_url, images: images || [],
-        completeness: Number(quality?.completeness || 0),
-        needs_review: quality?.needs_review ?? true,
-        review_status: quality?.review_status || "unreviewed",
-        auditLogs: {
-            create: {
-                actor: "admin@xor",
-                action: "create",
-                field: "component",
-                after: "created"
+    // Ensure compat_specs object exists to prevent "cannot read property of undefined"
+    const cs = compat_specs || {}; 
+
+    const result = await prisma.$transaction(async (tx) => {
+        // 1. Create Component (Store Dynamic JSON here)
+        const comp = await tx.component.create({
+            data: {
+                type,
+                brand,
+                model,
+                variant: variant || "",
+                image_url: image_url || "",
+                product_page: product_page || "",
+                price_current: parseNum(price),
+                
+                // ✅ Store Custom Specs JSON
+                specs: specs || {},
+
+                offers: price ? {
+                    create: {
+                        vendor: "Manual Entry",
+                        price: parseNum(price),
+                        url: product_page || "",
+                        in_stock: true
+                    }
+                } : undefined
             }
+        });
+
+        // 2. Create Strict Data (With Fallbacks for Safety)
+        if (type === 'CPU') {
+            await tx.cpu.create({
+                data: {
+                    componentId: comp.id,
+                    socket: cs.socket || "Unknown",
+                    cores: parseNum(cs.cores),
+                    threads: parseNum(cs.threads),
+                    base_clock: parseFloatNum(cs.base_clock),
+                    boost_clock: parseFloatNum(cs.boost_clock),
+                    tdp_watts: parseNum(cs.tdp_watts),
+                    integrated_gpu: cs.integrated_gpu === 'true' || cs.integrated_gpu === true,
+                    includes_cooler: cs.includes_cooler === 'true' || cs.includes_cooler === true
+                }
+            });
+        } 
+        else if (type === 'GPU') {
+            await tx.gpu.create({
+                data: {
+                    componentId: comp.id,
+                    chipset: cs.chipset || "Unknown",
+                    vram_gb: parseNum(cs.vram_gb),
+                    length_mm: parseNum(cs.length_mm),
+                    tdp_watts: parseNum(cs.tdp_watts),
+                    recommended_psu: parseNum(cs.recommended_psu)
+                }
+            });
         }
-      },
-      include: { category: true }
+        else if (type === 'MOTHERBOARD') {
+            await tx.motherboard.create({
+                data: {
+                    componentId: comp.id,
+                    socket: cs.socket || "Unknown",
+                    form_factor: cs.form_factor || "ATX",
+                    memory_type: cs.memory_type || "DDR4",
+                    memory_slots: parseNum(cs.memory_slots),
+                    max_memory_gb: parseNum(cs.max_memory_gb),
+                    m2_slots: parseNum(cs.m2_slots),
+                    wifi: cs.wifi === 'true' || cs.wifi === true
+                }
+            });
+        }
+        else if (type === 'RAM') {
+            await tx.ram.create({
+                data: {
+                    componentId: comp.id,
+                    memory_type: cs.memory_type || "DDR4",
+                    capacity_gb: parseNum(cs.capacity_gb),
+                    modules: parseNum(cs.modules),
+                    speed_mhz: parseNum(cs.speed_mhz),
+                    cas_latency: cs.cas_latency ? parseNum(cs.cas_latency) : null
+                }
+            });
+        }
+        else if (type === 'STORAGE') {
+            await tx.storage.create({
+                data: {
+                    componentId: comp.id,
+                    type: cs.type || "SSD",
+                    capacity_gb: parseNum(cs.capacity_gb),
+                    gen: cs.gen || "Gen3"
+                }
+            });
+        }
+        else if (type === 'PSU') {
+            await tx.psu.create({
+                data: {
+                    componentId: comp.id,
+                    wattage: parseNum(cs.wattage),
+                    efficiency: cs.efficiency || "Bronze",
+                    modular: cs.modular || "No"
+                }
+            });
+        }
+        else if (type === 'CABINET') {
+            await tx.cabinet.create({
+                data: {
+                    componentId: comp.id,
+                    supported_forms: Array.isArray(cs.supported_forms) ? cs.supported_forms : [],
+                    max_gpu_len_mm: parseNum(cs.max_gpu_len_mm),
+                    max_cpu_height: parseNum(cs.max_cpu_height)
+                }
+            });
+        }
+        else if (type === 'COOLER') {
+            await tx.cooler.create({
+                data: {
+                    componentId: comp.id,
+                    type: cs.type || "Air",
+                    sockets: Array.isArray(cs.sockets) ? cs.sockets : [],
+                    height_mm: cs.height_mm ? parseNum(cs.height_mm) : null,
+                    radiator_size: cs.radiator_size ? parseNum(cs.radiator_size) : null
+                }
+            });
+        }
+
+        return comp;
     });
 
-    res.json(newComp);
+    res.json({ success: true, data: result });
+
   } catch (error) {
     console.error("Create Error:", error);
-    if (error.code === 'P2002') {
-        return res.status(409).json({ error: "Component with this Brand/Model/Variant already exists." });
-    }
     res.status(500).json({ error: error.message });
   }
 };
 
-// --- UPDATE COMPONENT ---
 exports.updateComponent = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { field, value, oldValue, actor } = req.body;
-
-    const updateData = {};
-    let auditField = field || "update";
-    let auditBefore = oldValue ? String(oldValue) : "—";
-    let auditAfter = value ? String(value) : "—";
-
-    if(field && (field.startsWith("specs.") || field.startsWith("compatibility."))) {
-        const [root, key] = field.split('.');
-        const current = await prisma.component.findUnique({
-            where: {id}, select: {[root]: true}
-        });
-        const jsonObj = current[root] || {};
-        
-        if(root === 'specs') {
-            jsonObj[key] = { 
-                v: value, source_id: 'manual', confidence: 1.0, updated_at: new Date() 
-            };
-        } else {
-            jsonObj[key] = value;
-        }
-        updateData[root] = jsonObj;
-    } 
-    else if (field === 'variant_name') updateData.variant = value;
-    else if (field === 'product_page_url') updateData.product_page = value;
-    else if (field) updateData[field] = value;
-
-    const updated = await prisma.component.update({
-      where: { id },
-      data: {
-        ...updateData,
-        updatedAt: new Date(),
-        auditLogs: {
-          create: {
-            actor: actor || "admin@xor",
-            action: "update",
-            field: auditField,
-            before: auditBefore,
-            after: auditAfter
-          }
-        }
-      },
-      include: { auditLogs: true }
-    });
-
-    res.json(updated);
-  } catch (error) {
-    console.error("Update Error:", error);
-    res.status(500).json({ error: error.message });
-  }
-};
-
-// --- ADD TRACKED LINK ---
-exports.addTrackedLink = async (req, res) => {
     try {
-        const { componentId, url } = req.body;
+        const { id } = req.params;
+        const { type, specs, compat_specs, ...coreUpdates } = req.body;
 
-        if (!componentId || !url) {
-            return res.status(400).json({ error: "Component ID and URL are required" });
-        }
+        const result = await prisma.$transaction(async (tx) => {
+            let updatedComp = null;
+            
+            // 1. Update Core + Dynamic Specs
+            const updateData = { ...coreUpdates };
+            if (specs) updateData.specs = specs; // Update JSON if provided
 
-        let sourceId = "unknown";
-        if (url.includes("mdcomputers")) sourceId = "mdcomputers";
-        else if (url.includes("vedant")) sourceId = "vedant";
-        else if (url.includes("primeabgb")) sourceId = "primeabgb";
-        else if (url.includes("elitehubs")) sourceId = "elitehubs";
-
-        const newLink = await prisma.externalId.create({
-            data: {
-                componentId,
-                externalUrl: url,
-                sourceId: sourceId,
-                externalId: "manual-link",
-                matchMethod: "manual",
-                confidence: 1.0,
-                isActive: true
+            if (Object.keys(updateData).length > 0) {
+                updatedComp = await tx.component.update({
+                    where: { id },
+                    data: updateData
+                });
             }
+
+            // 2. Update Strict Compatibility Data
+            if (compat_specs && type) {
+                const cs = compat_specs;
+                if (type === 'CPU') await tx.cpu.update({ where: { componentId: id }, data: cs });
+                else if (type === 'GPU') await tx.gpu.update({ where: { componentId: id }, data: cs });
+                else if (type === 'MOTHERBOARD') await tx.motherboard.update({ where: { componentId: id }, data: cs });
+                else if (type === 'RAM') await tx.ram.update({ where: { componentId: id }, data: cs });
+                else if (type === 'STORAGE') await tx.storage.update({ where: { componentId: id }, data: cs });
+                else if (type === 'PSU') await tx.psu.update({ where: { componentId: id }, data: cs });
+                else if (type === 'CABINET') await tx.cabinet.update({ where: { componentId: id }, data: cs });
+                else if (type === 'COOLER') await tx.cooler.update({ where: { componentId: id }, data: cs });
+            }
+
+            return updatedComp || { id, message: "Specs updated" };
         });
 
-        console.log("⚡ Triggering instant scrape for new link...");
-        processSingleLink(newLink).then(result => {
-            if(result) console.log("⚡ Instant Update Complete!");
-        });
-
-        // Returning the raw Prisma object (newLink) ensures frontend gets camelCase keys
-        res.json({ 
-            message: "Link added! Price is updating in background...", 
-            data: newLink 
-        });
-
+        res.json({ success: true, data: result });
     } catch (error) {
-        console.error(error);
         res.status(500).json({ error: error.message });
     }
 };
 
-// --- ADD MANUAL OFFER ---
 exports.addManualOffer = async (req, res) => {
     try {
-        const { componentId, price, vendorName, inStock } = req.body;
-        console.log(`[API] Manual Offer: ${vendorName} - ₹${price}`);
+        const { componentId, price, vendorName, inStock, url } = req.body;
         
         const offer = await prisma.offer.create({
             data: {
                 componentId,
-                vendorId: vendorName || "Manual Entry",
-                sourceId: "manual",
+                vendor: vendorName || "Manual Entry",
                 price: Number(price),
-                effective_price: Number(price),
                 in_stock: inStock ?? true,
-                vendor_url: "",
-                shipping: 0,
-                last_updated: new Date()
+                url: url || "",
             }
         });
         res.json(offer);
     } catch (error) {
-        console.error("[API] Manual Offer Error:", error.message);
         res.status(500).json({ error: error.message });
     }
 };
 
-// --- FETCH SPECS FROM URL ---
+exports.deleteComponent = async (req, res) => {
+    try {
+        const { id } = req.params;
+        await prisma.component.delete({ where: { id } });
+        res.json({ success: true, message: "Component deleted successfully" });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+};
+
 exports.fetchSpecs = async (req, res) => {
     try {
         const { url } = req.body;

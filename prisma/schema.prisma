@@ -1,3 +1,5 @@
+// 1. prisma/schema.prisma
+
 generator client {
   provider = "prisma-client-js"
 }
@@ -7,93 +9,170 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model Category {
-  id         String      @id @default(uuid())
-  name       String      @unique
-  slug       String      @unique
-  specDefs   Json
-  compatKeys String[]
-  components Component[]
-}
-
-model CompatibilityRule {
-  id        String   @id @default(uuid())
-  name      String
-  severity  String
-  applies   String
-  expr      Json
-  message   String
-  enabled   Boolean  @default(true)
-  createdAt DateTime @default(now())
-}
-
+// --- MASTER COMPONENT TABLE ---
 model Component {
-  id            String       @id @default(uuid())
-  categoryId    String
-  category      Category     @relation(fields: [categoryId], references: [id])
-  brand         String
-  model         String
-  variant       String?      @default("")
-  ean           String?
-  active_status String       @default("active")
-  release_date  String?
-  warranty_years Int         @default(0)
-  images        String[]
-  product_page  String?
-  datasheet_url String?
-  specs         Json         @default("{}")
-  compatibility Json         @default("{}")
-  completeness  Int          @default(0)
-  needs_review  Boolean      @default(true)
-  review_status String       @default("unreviewed")
-  offers        Offer[]
-  externalIds   ExternalId[]
-  auditLogs     AuditLog[]
-  createdAt     DateTime     @default(now())
-  updatedAt     DateTime     @updatedAt
+  id           String   @id @default(uuid())
+  type         String   // "CPU", "GPU", "MOTHERBOARD", etc.
+  brand        String
+  model        String
+  variant      String?  @default("")
+  image_url    String?
+  product_page String?
+  price_current Int?     // Latest price cache
+
+  // ✅ NEW: Dynamic JSON Field (For extra admin data like RGB, Cache, Color)
+  specs        Json?    @default("{}")
+
+  // Relations
+  offers       Offer[]
+  externalIds  ExternalId[] 
+
+  // Specific Details (Strict Compatibility Data)
+  cpu          Cpu?
+  gpu          Gpu?
+  motherboard  Motherboard?
+  ram          Ram?
+  storage      Storage?
+  psu          Psu?
+  cabinet      Cabinet?
+  cooler       Cooler?
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
   @@unique([brand, model, variant])
 }
 
-model Offer {
-  id              String    @id @default(uuid())
-  componentId     String
-  component       Component @relation(fields: [componentId], references: [id], onDelete: Cascade)
-  vendorId        String
-  sourceId        String
-  price           Int
-  shipping        Int       @default(0)
-  effective_price Int
-  in_stock        Boolean   @default(false)
-  quantity        Int       @default(0)
-  vendor_url      String
-  last_updated    DateTime  @default(now())
+// --- TRACKING & PRICING ---
 
-  @@index([componentId])
+model Category {
+  id        String   @id @default(uuid())
+  name      String   @unique 
+  slug      String   @unique 
+  specKeys  Json?    
+  createdAt DateTime @default(now())
 }
 
 model ExternalId {
   id            String    @id @default(uuid())
   componentId   String
   component     Component @relation(fields: [componentId], references: [id], onDelete: Cascade)
-  sourceId      String
-  externalId    String
-  externalUrl   String?
-  matchMethod   String?
-  confidence    Float     @default(1.0)
+  externalUrl   String
+  sourceId      String?   
   isActive      Boolean   @default(true)
   lastCheckedAt DateTime?
-  failCount     Int       @default(0)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 }
 
-model AuditLog {
-  id          String    @id @default(uuid())
-  componentId String
-  component   Component @relation(fields: [componentId], references: [id], onDelete: Cascade)
-  actor       String
-  action      String
-  field       String
-  before      String?
-  after       String?
-  timestamp   DateTime  @default(now())
+model Offer {
+  id            String    @id @default(uuid())
+  componentId   String
+  component     Component @relation(fields: [componentId], references: [id], onDelete: Cascade)
+  vendor        String    
+  price         Int
+  in_stock      Boolean   @default(true)
+  url           String
+  
+  sourceId      String?   
+  shipping      Int       @default(0)
+  effective_price Int?
+
+  updatedAt     DateTime  @updatedAt
+}
+
+// --- SPECIFIC COMPONENT TABLES (Strict Data for Rules) ---
+
+model Cpu {
+  id              String    @id @default(uuid())
+  componentId     String    @unique
+  component       Component @relation(fields: [componentId], references: [id], onDelete: Cascade)
+  
+  socket          String
+  cores           Int
+  threads         Int
+  base_clock      Float
+  boost_clock     Float
+  tdp_watts       Int
+  integrated_gpu  Boolean   @default(false)
+  includes_cooler Boolean   @default(false)
+}
+
+model Motherboard {
+  id            String    @id @default(uuid())
+  componentId   String    @unique
+  component     Component @relation(fields: [componentId], references: [id], onDelete: Cascade)
+  
+  socket        String
+  form_factor   String
+  memory_type   String
+  memory_slots  Int
+  max_memory_gb Int
+  m2_slots      Int
+  wifi          Boolean   @default(false)
+}
+
+model Gpu {
+  id              String    @id @default(uuid())
+  componentId     String    @unique
+  component       Component @relation(fields: [componentId], references: [id], onDelete: Cascade)
+  
+  chipset         String
+  vram_gb         Int
+  length_mm       Int
+  tdp_watts       Int
+  recommended_psu Int
+}
+
+model Ram {
+  id            String    @id @default(uuid())
+  componentId   String    @unique
+  component     Component @relation(fields: [componentId], references: [id], onDelete: Cascade)
+  
+  memory_type   String
+  capacity_gb   Int
+  modules       Int
+  speed_mhz     Int
+  cas_latency   Int?
+}
+
+model Storage {
+  id            String    @id @default(uuid())
+  componentId   String    @unique
+  component     Component @relation(fields: [componentId], references: [id], onDelete: Cascade)
+  
+  type          String
+  capacity_gb   Int
+  gen           String?
+}
+
+model Psu {
+  id            String    @id @default(uuid())
+  componentId   String    @unique
+  component     Component @relation(fields: [componentId], references: [id], onDelete: Cascade)
+  
+  wattage       Int
+  efficiency    String?
+  modular       String?
+}
+
+model Cabinet {
+  id              String    @id @default(uuid())
+  componentId     String    @unique
+  component       Component @relation(fields: [componentId], references: [id], onDelete: Cascade)
+  
+  supported_forms String[]
+  max_gpu_len_mm  Int
+  max_cpu_height  Int
+}
+
+model Cooler {
+  id            String    @id @default(uuid())
+  componentId   String    @unique
+  component     Component @relation(fields: [componentId], references: [id], onDelete: Cascade)
+  
+  type          String
+  sockets       String[]
+  height_mm     Int?
+  radiator_size Int?
 }

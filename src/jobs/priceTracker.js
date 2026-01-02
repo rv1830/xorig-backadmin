@@ -1,91 +1,93 @@
-const prisma = require('../config/db');
-const { scrapeUrl } = require('../utils/scraper');
+// src/jobs/priceTracker.js
+const { PrismaClient } = require('@prisma/client');
+const prisma = new PrismaClient();
+// Ensure the path to scraper is correct based on your folder structure
+const { scrapeUrl } = require('../utils/scraper'); 
 
 async function processSingleLink(link) {
     try {
-        const validVendors = ['mdcomputers', 'vedant', 'primeabgb', 'elitehubs'];
-        const isValid = validVendors.some(v => link.externalUrl.includes(v));
+        console.log(`[Job] 🔎 Processing: ${link.externalUrl}`);
         
-        if (!isValid) return;
-
-        console.log(`[Job] 🔎 Processing Link ID: ${link.id} (${link.sourceId})`);
+        // 1. Scrape Data
         const data = await scrapeUrl(link.externalUrl);
-
-        if (!data) {
-            console.log(`[Job] ⚠️ Null Data returned for ${link.externalUrl}`);
+        
+        // Validation: If scrape failed or price is 0
+        if (!data || !data.price || data.price === 0) {
+            console.log(`[Job] ⚠️ Skipped (No Data/Zero Price): ${link.externalUrl}`);
             return;
         }
 
-        if (data.price === 0) {
-            console.log(`[Job] ⚠️ Zero Price Detected. Skipping DB Update.`);
-            return;
-        }
-
-        let retries = 3;
-        while (retries > 0) {
-            try {
-                const existingOffer = await prisma.offer.findFirst({
-                    where: { componentId: link.componentId, vendorId: data.vendor }
-                });
-
-                if (existingOffer) {
-                    await prisma.offer.update({
-                        where: { id: existingOffer.id },
-                        data: {
-                            price: data.price,
-                            effective_price: data.price,
-                            in_stock: data.inStock,
-                            last_updated: new Date()
-                        }
-                    });
-                    console.log(`[DB] ✅ Offer Updated: ₹${data.price}`);
-                } else {
-                    await prisma.offer.create({
-                        data: {
-                            componentId: link.componentId,
-                            vendorId: data.vendor,
-                            sourceId: "scraper-auto",
-                            vendor_url: link.externalUrl,
-                            price: data.price,
-                            effective_price: data.price,
-                            in_stock: data.inStock,
-                            shipping: 0
-                        }
-                    });
-                    console.log(`[DB] ✅ New Offer Created: ₹${data.price}`);
-                }
-                
-                await prisma.externalId.update({
-                    where: { id: link.id },
-                    data: { lastCheckedAt: new Date() }
-                });
-                break; 
-
-            } catch (dbError) {
-                console.error(`[DB] ⚠️ Connection Error (Attempt ${4 - retries}): ${dbError.message}`);
-                retries--;
-                await new Promise(r => setTimeout(r, 2000));
+        const vendorName = data.vendor || "Unknown";
+        
+        // 2. Update DB (Offers Table)
+        // Check if we already have an offer for this Component + Vendor
+        const existingOffer = await prisma.offer.findFirst({
+            where: {
+                componentId: link.componentId,
+                vendor: vendorName // ✅ FIXED: Schema uses 'vendor', not 'vendorId'
             }
+        });
+
+        if (existingOffer) {
+            // Update existing offer
+            await prisma.offer.update({
+                where: { id: existingOffer.id },
+                data: {
+                    price: data.price,
+                    effective_price: data.price, // Assuming free shipping or same logic
+                    in_stock: data.inStock,
+                    url: link.externalUrl, // Ensure URL is up to date
+                    updatedAt: new Date()
+                }
+            });
+            console.log(`[Job] ✅ Offer Updated: ₹${data.price} (${vendorName})`);
+        } else {
+            // Create new offer
+            await prisma.offer.create({
+                data: {
+                    componentId: link.componentId,
+                    vendor: vendorName, // ✅ FIXED: Schema uses 'vendor'
+                    price: data.price,
+                    effective_price: data.price,
+                    in_stock: data.inStock,
+                    url: link.externalUrl, // ✅ FIXED: Schema uses 'url', not 'vendor_url'
+                    sourceId: "scraper-auto",
+                    shipping: 0
+                }
+            });
+            console.log(`[Job] ✅ New Offer Created: ₹${data.price} (${vendorName})`);
         }
-        return data;
+
+        // 3. Update ExternalId timestamp (Heartbeat)
+        await prisma.externalId.update({
+            where: { id: link.id },
+            data: { lastCheckedAt: new Date() }
+        });
 
     } catch (error) {
-        console.error(`[Job] ❌ Process Error: ${error.message}`);
+        console.error(`[Job] ❌ Error processing link ${link.id}: ${error.message}`);
     }
-    return null;
 }
 
 async function runPriceTracker() {
     console.log("[Job] 🚀 Bulk Tracker Started");
     try {
+        // 
+        // This query fetches all active tracking links to process
         const trackedLinks = await prisma.externalId.findMany({
-            where: { externalUrl: { not: null }, isActive: true }
+            where: {
+                externalUrl: { 
+                    not: "" // ✅ FIXED: Required strings cannot be null, check for empty string
+                }, 
+                isActive: true
+            }
         });
 
         console.log(`[Job] Found ${trackedLinks.length} active links.`);
 
         for (const link of trackedLinks) {
             await processSingleLink(link);
+            // Wait 3 seconds between requests to avoid IP blocking
             await new Promise(resolve => setTimeout(resolve, 3000)); 
         }
         console.log("[Job] 💤 Bulk Tracker Sleep");
