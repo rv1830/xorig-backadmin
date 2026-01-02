@@ -42,18 +42,18 @@ exports.getComponents = async (req, res) => {
         image_url: true,
         price_current: true,
         updatedAt: true,
-        product_page: true,
-        specs: true, // ✅ Return dynamic specs
+        // List view ke liye specs aur product_page ki zarurat nahi hai ab
         offers: {
           where: { in_stock: true },
           orderBy: { price: 'asc' },
           take: 1,
-          select: { price: true, vendor: true, url: true }
+          select: { price: true, vendor: true }
         }
       },
       orderBy: { updatedAt: 'desc' }
     });
 
+    // Formatting strictly as requested
     const formatted = components.map(c => ({
       id: c.id,
       type: c.type,
@@ -64,10 +64,7 @@ exports.getComponents = async (req, res) => {
       image: c.image_url,
       best_price: c.offers[0] ? c.offers[0].price : c.price_current,
       vendor: c.offers[0] ? c.offers[0].vendor : 'N/A',
-      url: c.offers[0] ? c.offers[0].url : c.product_page,
-      updatedAt: c.updatedAt,
-      // Pass raw data for editing
-      specs: c.specs, 
+      updatedAt: c.updatedAt
     }));
 
     res.json(formatted);
@@ -100,13 +97,10 @@ exports.getComponentById = async (req, res) => {
         case 'COOLER': strictData = await prisma.cooler.findUnique({ where: { componentId: id } }); break;
     }
 
-    // Return combined data:
-    // 1. Base info (brand, model)
-    // 2. specs: Dynamic JSON (Admin defined)
-    // 3. cpu/gpu/...: Strict data (for compatibility)
+    // Return EVERYTHING here
     res.json({ 
         ...base, 
-        [base.type.toLowerCase()]: strictData // e.g. "cpu": { cores: 6 }
+        [base.type.toLowerCase()]: strictData 
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -128,7 +122,6 @@ exports.createComponent = async (req, res) => {
         return res.status(400).json({ error: "Type, Brand and Model are required" });
     }
 
-    // Ensure compat_specs object exists to prevent "cannot read property of undefined"
     const cs = compat_specs || {}; 
 
     const result = await prisma.$transaction(async (tx) => {
@@ -141,9 +134,8 @@ exports.createComponent = async (req, res) => {
                 variant: variant || "",
                 image_url: image_url || "",
                 product_page: product_page || "",
-                price_current: parseNum(price),
+                price_current: parseNum(price), // Map price -> price_current
                 
-                // ✅ Store Custom Specs JSON
                 specs: specs || {},
 
                 offers: price ? {
@@ -157,7 +149,7 @@ exports.createComponent = async (req, res) => {
             }
         });
 
-        // 2. Create Strict Data (With Fallbacks for Safety)
+        // 2. Create Strict Data
         if (type === 'CPU') {
             await tx.cpu.create({
                 data: {
@@ -267,14 +259,23 @@ exports.createComponent = async (req, res) => {
 exports.updateComponent = async (req, res) => {
     try {
         const { id } = req.params;
-        const { type, specs, compat_specs, ...coreUpdates } = req.body;
+        
+        // FIX: Extract 'offers' to prevent crash. Extract 'price' to map it manually.
+        const { type, specs, compat_specs, offers, price, ...coreUpdates } = req.body;
 
         const result = await prisma.$transaction(async (tx) => {
             let updatedComp = null;
             
-            // 1. Update Core + Dynamic Specs
+            // 1. Prepare Update Data
             const updateData = { ...coreUpdates };
-            if (specs) updateData.specs = specs; // Update JSON if provided
+            
+            // Map 'price' from frontend to 'price_current' in DB if it exists
+            if (price !== undefined) {
+                updateData.price_current = Number(price);
+            }
+
+            // Update JSON if provided
+            if (specs) updateData.specs = specs; 
 
             if (Object.keys(updateData).length > 0) {
                 updatedComp = await tx.component.update({
@@ -301,6 +302,7 @@ exports.updateComponent = async (req, res) => {
 
         res.json({ success: true, data: result });
     } catch (error) {
+        console.error("Update Error:", error);
         res.status(500).json({ error: error.message });
     }
 };
