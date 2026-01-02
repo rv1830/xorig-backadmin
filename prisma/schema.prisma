@@ -176,3 +176,22 @@ model Cooler {
   height_mm     Int?
   radiator_size Int?
 }
+
+// --- RULES ENGINE ---
+
+model CompatibilityRule {
+  id          String   @id @default(uuid())
+  name        String
+  severity    String   // "error" | "warn" | "info"
+  message     String   // "CPU Socket does not match Motherboard Socket"
+  
+  // Rule kin components pe apply hota hai (e.g. ["CPU", "MOTHERBOARD"])
+  appliesTo   String[] 
+  
+  // JSON Logic Object (e.g. { "==": [{"var": "cpu.socket"}, {"var": "motherboard.socket"}] })
+  logic       Json     
+  
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}

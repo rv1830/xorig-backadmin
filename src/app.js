@@ -15,10 +15,10 @@ app.use(express.urlencoded({ extended: true }));
 // --- ROUTES ---
 app.use('/api', apiRoutes);
 
-cron.schedule('* * * * *', () => {
-    console.log("⏰ 1-Minute Scheduler Triggered");
-    runPriceTracker();
-});
+// cron.schedule('* * * * *', () => {
+//     console.log("⏰ 1-Minute Scheduler Triggered");
+//     runPriceTracker();
+// });
 
 app.get('/', (req, res) => {
   res.send('XO Rig Backend is running');
