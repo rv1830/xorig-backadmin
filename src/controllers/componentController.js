@@ -4,14 +4,22 @@ const { scrapeSpecs } = require('../utils/scraper');
 
 // --- Helper to prevent NaN Crashes ---
 const parseNum = (val) => {
+    if (val === undefined || val === null || val === "") return undefined; // Update ke liye undefined chhod do agar missing hai
     const n = Number(val);
     return isNaN(n) ? 0 : n;
 };
 
 // --- Helper to parse Float ---
 const parseFloatNum = (val) => {
+    if (val === undefined || val === null || val === "") return undefined;
     const n = parseFloat(val);
     return isNaN(n) ? 0.0 : n;
+};
+
+// --- Helper for Booleans ---
+const parseBool = (val) => {
+    if (val === undefined || val === null) return undefined;
+    return val === 'true' || val === 'True' || val === true;
 };
 
 exports.getComponents = async (req, res) => {
@@ -42,30 +50,41 @@ exports.getComponents = async (req, res) => {
         image_url: true,
         price_current: true,
         updatedAt: true,
-        // List view ke liye specs aur product_page ki zarurat nahi hai ab
         offers: {
           where: { in_stock: true },
           orderBy: { price: 'asc' },
-          take: 1,
+          take: 1, // Sabse sasta offer uthao
           select: { price: true, vendor: true }
         }
       },
       orderBy: { updatedAt: 'desc' }
     });
 
-    // Formatting strictly as requested
-    const formatted = components.map(c => ({
-      id: c.id,
-      type: c.type,
-      name: `${c.brand} ${c.model} ${c.variant || ''}`.trim(),
-      brand: c.brand,
-      model: c.model,
-      variant: c.variant,
-      image: c.image_url,
-      best_price: c.offers[0] ? c.offers[0].price : c.price_current,
-      vendor: c.offers[0] ? c.offers[0].vendor : 'N/A',
-      updatedAt: c.updatedAt
-    }));
+    const formatted = components.map(c => {
+        // --- BEST PRICE LOGIC ---
+        // 1. Current Price lo
+        let prices = [];
+        if (c.price_current) prices.push(c.price_current);
+        
+        // 2. Offer Price lo
+        if (c.offers.length > 0) prices.push(c.offers[0].price);
+
+        // 3. Jo sabse kam ho wo Best Price hai (0 ko ignore karo agar data hai)
+        const bestPrice = prices.length > 0 ? Math.min(...prices) : 0;
+
+        return {
+            id: c.id,
+            type: c.type,
+            name: `${c.brand} ${c.model} ${c.variant || ''}`.trim(),
+            brand: c.brand,
+            model: c.model,
+            variant: c.variant,
+            image: c.image_url,
+            best_price: bestPrice, 
+            vendor: c.offers[0] ? c.offers[0].vendor : 'N/A',
+            updatedAt: c.updatedAt
+        };
+    });
 
     res.json(formatted);
   } catch (error) {
@@ -97,7 +116,6 @@ exports.getComponentById = async (req, res) => {
         case 'COOLER': strictData = await prisma.cooler.findUnique({ where: { componentId: id } }); break;
     }
 
-    // Return EVERYTHING here
     res.json({ 
         ...base, 
         [base.type.toLowerCase()]: strictData 
@@ -112,10 +130,7 @@ exports.createComponent = async (req, res) => {
     const { 
         type, brand, model, variant, 
         price, image_url, product_page, 
-        
-        // Two types of data from Frontend:
-        specs,        // 1. Dynamic JSON (Custom fields)
-        compat_specs  // 2. Strict Fields (Socket, Cores etc.)
+        specs, compat_specs
     } = req.body;
 
     if (!type || !brand || !model) {
@@ -125,7 +140,7 @@ exports.createComponent = async (req, res) => {
     const cs = compat_specs || {}; 
 
     const result = await prisma.$transaction(async (tx) => {
-        // 1. Create Component (Store Dynamic JSON here)
+        // 1. Create Component
         const comp = await tx.component.create({
             data: {
                 type,
@@ -134,10 +149,8 @@ exports.createComponent = async (req, res) => {
                 variant: variant || "",
                 image_url: image_url || "",
                 product_page: product_page || "",
-                price_current: parseNum(price), // Map price -> price_current
-                
+                price_current: parseNum(price),
                 specs: specs || {},
-
                 offers: price ? {
                     create: {
                         vendor: "Manual Entry",
@@ -149,7 +162,7 @@ exports.createComponent = async (req, res) => {
             }
         });
 
-        // 2. Create Strict Data
+        // 2. Create Strict Data (With Parsing)
         if (type === 'CPU') {
             await tx.cpu.create({
                 data: {
@@ -160,8 +173,8 @@ exports.createComponent = async (req, res) => {
                     base_clock: parseFloatNum(cs.base_clock),
                     boost_clock: parseFloatNum(cs.boost_clock),
                     tdp_watts: parseNum(cs.tdp_watts),
-                    integrated_gpu: cs.integrated_gpu === 'true' || cs.integrated_gpu === true,
-                    includes_cooler: cs.includes_cooler === 'true' || cs.includes_cooler === true
+                    integrated_gpu: parseBool(cs.integrated_gpu),
+                    includes_cooler: parseBool(cs.includes_cooler)
                 }
             });
         } 
@@ -187,7 +200,7 @@ exports.createComponent = async (req, res) => {
                     memory_slots: parseNum(cs.memory_slots),
                     max_memory_gb: parseNum(cs.max_memory_gb),
                     m2_slots: parseNum(cs.m2_slots),
-                    wifi: cs.wifi === 'true' || cs.wifi === true
+                    wifi: parseBool(cs.wifi)
                 }
             });
         }
@@ -260,21 +273,17 @@ exports.updateComponent = async (req, res) => {
     try {
         const { id } = req.params;
         
-        // FIX: Extract 'offers' to prevent crash. Extract 'price' to map it manually.
+        // Clean Data
         const { type, specs, compat_specs, offers, price, ...coreUpdates } = req.body;
 
         const result = await prisma.$transaction(async (tx) => {
             let updatedComp = null;
             
-            // 1. Prepare Update Data
+            // 1. Update Core
             const updateData = { ...coreUpdates };
-            
-            // Map 'price' from frontend to 'price_current' in DB if it exists
-            if (price !== undefined) {
+            if (price !== undefined && price !== "") {
                 updateData.price_current = Number(price);
             }
-
-            // Update JSON if provided
             if (specs) updateData.specs = specs; 
 
             if (Object.keys(updateData).length > 0) {
@@ -284,17 +293,105 @@ exports.updateComponent = async (req, res) => {
                 });
             }
 
-            // 2. Update Strict Compatibility Data
+            // 2. Update Strict Data with Explicit Casting
+            // (Isse wo Int vs String wala error fix ho jayega)
             if (compat_specs && type) {
                 const cs = compat_specs;
-                if (type === 'CPU') await tx.cpu.update({ where: { componentId: id }, data: cs });
-                else if (type === 'GPU') await tx.gpu.update({ where: { componentId: id }, data: cs });
-                else if (type === 'MOTHERBOARD') await tx.motherboard.update({ where: { componentId: id }, data: cs });
-                else if (type === 'RAM') await tx.ram.update({ where: { componentId: id }, data: cs });
-                else if (type === 'STORAGE') await tx.storage.update({ where: { componentId: id }, data: cs });
-                else if (type === 'PSU') await tx.psu.update({ where: { componentId: id }, data: cs });
-                else if (type === 'CABINET') await tx.cabinet.update({ where: { componentId: id }, data: cs });
-                else if (type === 'COOLER') await tx.cooler.update({ where: { componentId: id }, data: cs });
+                
+                if (type === 'CPU') {
+                    await tx.cpu.update({
+                        where: { componentId: id },
+                        data: {
+                            socket: cs.socket,
+                            cores: parseNum(cs.cores),
+                            threads: parseNum(cs.threads),
+                            base_clock: parseFloatNum(cs.base_clock),
+                            boost_clock: parseFloatNum(cs.boost_clock),
+                            tdp_watts: parseNum(cs.tdp_watts),
+                            integrated_gpu: parseBool(cs.integrated_gpu),
+                            includes_cooler: parseBool(cs.includes_cooler)
+                        }
+                    });
+                }
+                else if (type === 'GPU') {
+                    await tx.gpu.update({
+                        where: { componentId: id },
+                        data: {
+                            chipset: cs.chipset,
+                            vram_gb: parseNum(cs.vram_gb),
+                            length_mm: parseNum(cs.length_mm),
+                            tdp_watts: parseNum(cs.tdp_watts),
+                            recommended_psu: parseNum(cs.recommended_psu)
+                        }
+                    });
+                }
+                else if (type === 'MOTHERBOARD') {
+                    await tx.motherboard.update({
+                        where: { componentId: id },
+                        data: {
+                            socket: cs.socket,
+                            form_factor: cs.form_factor,
+                            memory_type: cs.memory_type,
+                            memory_slots: parseNum(cs.memory_slots),
+                            max_memory_gb: parseNum(cs.max_memory_gb),
+                            m2_slots: parseNum(cs.m2_slots),
+                            wifi: parseBool(cs.wifi)
+                        }
+                    });
+                }
+                else if (type === 'RAM') {
+                    await tx.ram.update({
+                        where: { componentId: id },
+                        data: {
+                            memory_type: cs.memory_type,
+                            capacity_gb: parseNum(cs.capacity_gb),
+                            modules: parseNum(cs.modules),
+                            speed_mhz: parseNum(cs.speed_mhz),
+                            cas_latency: parseNum(cs.cas_latency)
+                        }
+                    });
+                }
+                else if (type === 'STORAGE') {
+                    await tx.storage.update({
+                        where: { componentId: id },
+                        data: {
+                            type: cs.type,
+                            capacity_gb: parseNum(cs.capacity_gb),
+                            gen: cs.gen
+                        }
+                    });
+                }
+                else if (type === 'PSU') {
+                    await tx.psu.update({
+                        where: { componentId: id },
+                        data: {
+                            wattage: parseNum(cs.wattage),
+                            efficiency: cs.efficiency,
+                            modular: cs.modular
+                        }
+                    });
+                }
+                else if (type === 'CABINET') {
+                    await tx.cabinet.update({
+                        where: { componentId: id },
+                        data: {
+                            supported_forms: cs.supported_forms,
+                            max_gpu_len_mm: parseNum(cs.max_gpu_len_mm),
+                            max_cpu_height: parseNum(cs.max_cpu_height)
+                        }
+                    });
+                }
+                else if (type === 'COOLER') {
+                    await tx.cooler.update({
+                        where: { componentId: id },
+                        data: {
+                            type: cs.type,
+                            sockets: cs.sockets,
+                            height_mm: parseNum(cs.height_mm),
+                            radiator_size: parseNum(cs.radiator_size)
+                        }
+                    });
+                }
             }
 
             return updatedComp || { id, message: "Specs updated" };
